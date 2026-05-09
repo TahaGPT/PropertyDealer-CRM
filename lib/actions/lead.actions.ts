@@ -2,9 +2,10 @@
 
 import dbConnect from '@/lib/mongodb';
 import Lead from '@/models/Lead';
+import User from '@/models/User';
 import ActivityLog from '@/models/ActivityLog';
 import { revalidatePath } from 'next/cache';
-import { sendEmailNotification } from './email.actions';
+import { sendEmailNotification, sendDirectEmail } from './email.actions';
 import { EMAIL_TEMPLATES } from '@/lib/constants/email-templates';
 import { createLeadSchema, updateLeadSchema, validateData } from '@/lib/validations';
 
@@ -26,10 +27,13 @@ export async function createLead(formData: any, userId: string) {
       details: `Lead created by ${userId}`,
     });
 
-    // Notify Admin about new lead
-    await sendEmailNotification('admin@estatecrm.com', 'New Lead Created', EMAIL_TEMPLATES.NEW_LEAD, {
+    // Notify Admin about new lead (email + in-app notification)
+    await sendEmailNotification('admin', 'New Lead Created', EMAIL_TEMPLATES.NEW_LEAD, {
       leadName: lead.name,
       interest: lead.propertyInterest,
+      budget: lead.budget,
+      email: lead.email,
+      phone: lead.phone,
     });
 
     revalidatePath('/leads');
@@ -69,10 +73,18 @@ export async function updateLead(id: string, updates: any, userId: string) {
     } else if (updates.assignedTo && updates.assignedTo !== oldLead.assignedTo?._id?.toString()) {
       actionDetails = `Lead assigned/reassigned`;
       
-      // Notify Agent about assignment
+      // Notify Agent about assignment (direct email to agent)
       if (lead.assignedTo) {
-        await sendEmailNotification(lead.assignedTo.email, 'New Lead Assigned', EMAIL_TEMPLATES.ASSIGNMENT, {
+        await sendDirectEmail(lead.assignedTo.email, EMAIL_TEMPLATES.ASSIGNMENT, {
           leadName: lead.name,
+          interest: lead.propertyInterest,
+        });
+
+        // Notify Admin about client assignment to agent (email + in-app notification)
+        await sendEmailNotification('admin', 'Client Assigned', EMAIL_TEMPLATES.CLIENT_ASSIGNED, {
+          leadName: lead.name,
+          agentName: lead.assignedTo.name,
+          agentEmail: lead.assignedTo.email,
           interest: lead.propertyInterest,
         });
       }
@@ -100,6 +112,11 @@ export async function updateLead(id: string, updates: any, userId: string) {
 export async function deleteLead(id: string, userId: string) {
   try {
     await dbConnect();
+    
+    // Fetch lead details before deleting for the notification
+    const lead = await Lead.findById(id);
+    const deletingUser = await User.findById(userId).select('name');
+    
     await Lead.findByIdAndDelete(id);
     
     // Log the deletion (using a general log entry)
@@ -109,6 +126,16 @@ export async function deleteLead(id: string, userId: string) {
       action: 'DELETED',
       details: `Lead deleted by ${userId}`,
     });
+
+    // Notify Admin about customer deletion (email + in-app notification)
+    if (lead) {
+      await sendEmailNotification('admin', 'Customer Deleted', EMAIL_TEMPLATES.CUSTOMER_DELETED, {
+        leadName: lead.name,
+        deletedBy: deletingUser?.name || 'Unknown User',
+        email: lead.email,
+        interest: lead.propertyInterest,
+      });
+    }
     
     revalidatePath('/leads');
     return { success: true };
